@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "85545858791",
+    "project_id": "validacioncorreo-64f8e",
+    "storage_bucket": "validacioncorreo-64f8e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:85545858791:android:0e179f85123a498a17d442",
+        "android_client_info": {
+          "package_name": "com.example.sharedpref"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBDglvOPo-3z-6s1TVOoo7bVEQ5iYQ-WKY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
