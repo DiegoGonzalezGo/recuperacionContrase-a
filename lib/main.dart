@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import 'auth_screen.dart';
 
 Future<void> main() async {
@@ -34,6 +38,10 @@ class MiAplicacion extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
       ),
+      builder: errorInicializacion == null
+          ? (context, child) =>
+                SesionConInactividad(child: child ?? const SizedBox.shrink())
+          : null,
       home: errorInicializacion == null
           ? const AuthGate()
           : const Scaffold(
@@ -87,6 +95,170 @@ class AuthGate extends StatelessWidget {
   }
 }
 
+class SesionConInactividad extends StatefulWidget {
+  const SesionConInactividad({required this.child, super.key});
+
+  final Widget child;
+
+  static void registrarActividad(BuildContext context) {
+    context
+        .getInheritedWidgetOfExactType<_SesionInactividadScope>()
+        ?.registrarActividad();
+  }
+
+  static Future<void> cerrarSesion(BuildContext context) async {
+    final scope = context
+        .getInheritedWidgetOfExactType<_SesionInactividadScope>();
+    if (scope == null) {
+      await FirebaseAuth.instance.signOut();
+      return;
+    }
+    await scope.cerrarSesion(context);
+  }
+
+  @override
+  State<SesionConInactividad> createState() => _SesionConInactividadState();
+}
+
+class _SesionConInactividadState extends State<SesionConInactividad>
+    with WidgetsBindingObserver {
+  static const _duracionInactividad = Duration(seconds: 15);
+
+  StreamSubscription<User?>? _suscripcionAuth;
+  Timer? _temporizador;
+  DateTime? _ultimaActividad;
+  bool _autenticado = false;
+  bool _cerrandoSesion = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _suscripcionAuth = FirebaseAuth.instance.authStateChanges().listen(
+      _actualizarEstadoAutenticacion,
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint(
+          'Inactivity monitor could not observe auth state '
+          '(${error.runtimeType}).',
+        );
+      },
+    );
+  }
+
+  void _actualizarEstadoAutenticacion(User? usuario) {
+    _autenticado = usuario != null;
+    if (!_autenticado) {
+      _temporizador?.cancel();
+      _temporizador = null;
+      _ultimaActividad = null;
+      _cerrandoSesion = false;
+      return;
+    }
+
+    if (_ultimaActividad == null) {
+      _registrarActividad();
+    }
+  }
+
+  void _registrarActividad() {
+    if (!_autenticado || _cerrandoSesion) return;
+
+    _ultimaActividad = DateTime.now();
+    _programarCierre(_duracionInactividad);
+  }
+
+  void _programarCierre(Duration demora) {
+    _temporizador?.cancel();
+    _temporizador = Timer(demora, _comprobarInactividad);
+  }
+
+  void _comprobarInactividad() {
+    if (!_autenticado || _cerrandoSesion || _ultimaActividad == null) return;
+
+    final transcurrido = DateTime.now().difference(_ultimaActividad!);
+    final restante = _duracionInactividad - transcurrido;
+    if (restante > Duration.zero) {
+      _programarCierre(restante);
+      return;
+    }
+
+    unawaited(_cerrarSesion());
+  }
+
+  Future<void> _cerrarSesion([BuildContext? contextoManual]) async {
+    if (!_autenticado || _cerrandoSesion) return;
+
+    _temporizador?.cancel();
+    _temporizador = null;
+    _cerrandoSesion = true;
+    var cierreCompletado = false;
+    try {
+      await FirebaseAuth.instance.signOut();
+      cierreCompletado = true;
+    } on FirebaseAuthException catch (error) {
+      debugPrint('Sign out failed (${error.code}).');
+      if (contextoManual != null && contextoManual.mounted) {
+        ScaffoldMessenger.of(contextoManual)
+            .showSnackBar(SnackBar(content: Text(mensajeErrorFirebase(error))));
+      }
+    } finally {
+      if (!cierreCompletado && _autenticado) {
+        _cerrandoSesion = false;
+        _registrarActividad();
+      }
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _comprobarInactividad();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _temporizador?.cancel();
+    unawaited(_suscripcionAuth?.cancel());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      onPointerDown: (_) => _registrarActividad(),
+      onPointerMove: (_) => _registrarActividad(),
+      onPointerSignal: (_) => _registrarActividad(),
+      child: Focus(
+        onKeyEvent: (node, event) {
+          _registrarActividad();
+          return KeyEventResult.ignored;
+        },
+        child: _SesionInactividadScope(
+          registrarActividad: _registrarActividad,
+          cerrarSesion: _cerrarSesion,
+          child: widget.child,
+        ),
+      ),
+    );
+  }
+}
+
+class _SesionInactividadScope extends InheritedWidget {
+  const _SesionInactividadScope({
+    required this.registrarActividad,
+    required this.cerrarSesion,
+    required super.child,
+  });
+
+  final VoidCallback registrarActividad;
+  final Future<void> Function([BuildContext? contextoManual]) cerrarSesion;
+
+  @override
+  bool updateShouldNotify(_SesionInactividadScope oldWidget) => false;
+}
+
 class PantallaUsuario extends StatefulWidget {
   const PantallaUsuario({super.key});
 
@@ -99,12 +271,15 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
   final usuarioController = TextEditingController();
   final matriculaController = TextEditingController();
   final numeroController = TextEditingController();
+  final ImagePicker _selectorImagen = ImagePicker();
 
   String nombreGuardado = '';
   String usuarioGuardado = '';
   String matriculaGuardada = '';
   String numeroGuardado = '';
+  XFile? _imagenCapturada;
   bool cargando = true;
+  bool _abriendoCamara = false;
 
   @override
   void initState() {
@@ -203,6 +378,84 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
     });
   }
 
+  Future<void> _abrirCamara() async {
+    if (_abriendoCamara) return;
+    setState(() => _abriendoCamara = true);
+
+    try {
+      final permiso = await Permission.camera.request();
+      if (!mounted) return;
+
+      if (!permiso.isGranted) {
+        final requiereConfiguracion =
+            permiso.isPermanentlyDenied || permiso.isRestricted;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              requiereConfiguracion
+                  ? 'El permiso de cámara está bloqueado. Habilítalo en la configuración de la aplicación.'
+                  : 'Se necesita permiso de cámara para tomar una foto.',
+            ),
+            action: requiereConfiguracion
+                ? SnackBarAction(
+                    label: 'Abrir ajustes',
+                    onPressed: () async {
+                      await openAppSettings();
+                    },
+                  )
+                : null,
+          ),
+        );
+        return;
+      }
+
+      final imagen = await _selectorImagen.pickImage(
+        source: ImageSource.camera,
+      );
+      if (imagen == null || !mounted) return;
+      setState(() => _imagenCapturada = imagen);
+    } on PlatformException catch (error) {
+      debugPrint('Could not open camera (${error.code}).');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No se pudo abrir la cámara.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _abriendoCamara = false);
+    }
+  }
+
+  Widget _controlesCamara() {
+    return Column(
+      children: [
+        if (_imagenCapturada != null) ...[
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.file(
+              File(_imagenCapturada!.path),
+              width: double.infinity,
+              height: 220,
+              fit: BoxFit.cover,
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
+        OutlinedButton.icon(
+          onPressed: _abriendoCamara ? null : _abrirCamara,
+          icon: _abriendoCamara
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.camera_alt_outlined),
+          label: Text(_abriendoCamara ? 'Abriendo cámara...' : 'Abrir cámara'),
+        ),
+      ],
+    );
+  }
+
   @override
   void dispose() {
     nombreController.dispose();
@@ -229,14 +482,7 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
           IconButton(
             tooltip: 'Cerrar sesión',
             onPressed: () async {
-              try {
-                await FirebaseAuth.instance.signOut();
-              } on FirebaseAuthException catch (error) {
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(mensajeErrorFirebase(error))),
-                );
-              }
+              await SesionConInactividad.cerrarSesion(context);
             },
             icon: const Icon(Icons.logout),
           ),
@@ -284,6 +530,8 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
                       icon: const Icon(Icons.delete_outline),
                       label: const Text('Eliminar datos'),
                     ),
+                    const SizedBox(height: 16),
+                    _controlesCamara(),
                   ],
                 )
               : Column(
@@ -306,6 +554,8 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
                     const SizedBox(height: 24),
                     TextField(
                       controller: nombreController,
+                      onChanged: (_) =>
+                          SesionConInactividad.registrarActividad(context),
                       decoration: const InputDecoration(
                         labelText: 'Nombre completo',
                         prefixIcon: Icon(Icons.person),
@@ -315,6 +565,8 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
                     const SizedBox(height: 16),
                     TextField(
                       controller: usuarioController,
+                      onChanged: (_) =>
+                          SesionConInactividad.registrarActividad(context),
                       decoration: const InputDecoration(
                         labelText: 'Nombre de usuario',
                         prefixIcon: Icon(Icons.account_box),
@@ -324,6 +576,8 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
                     const SizedBox(height: 16),
                     TextField(
                       controller: matriculaController,
+                      onChanged: (_) =>
+                          SesionConInactividad.registrarActividad(context),
                       decoration: const InputDecoration(
                         labelText: 'Matrícula',
                         prefixIcon: Icon(Icons.numbers),
@@ -333,6 +587,8 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
                     const SizedBox(height: 16),
                     TextField(
                       controller: numeroController,
+                      onChanged: (_) =>
+                          SesionConInactividad.registrarActividad(context),
                       decoration: const InputDecoration(
                         labelText: 'Número de teléfono',
                         prefixIcon: Icon(Icons.phone),
@@ -344,6 +600,8 @@ class _PantallaUsuarioState extends State<PantallaUsuario> {
                       onPressed: guardarDatos,
                       child: const Text('Guardar datos'),
                     ),
+                    const SizedBox(height: 16),
+                    _controlesCamara(),
                   ],
                 ),
         ),
